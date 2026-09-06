@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"payment-gateway/internal/payment"
@@ -15,10 +16,12 @@ type PaymentRepository interface {
 	Save(ctx context.Context, p payment.Payment) error
 	GetByID(ctx context.Context, paymentID string) (payment.Payment, error)
 	Update(ctx context.Context, p payment.Payment) error
+	GetByIdempotencyKey(ctx context.Context, idempotencyKey string) (payment.Payment, error)
 }
 
 var ErrPaymentNotFound = errors.New("payment not found")
 var OptimisticLockingConflict = errors.New("optimistic locking conflict")
+var ErrIdempotencyConflict = errors.New("idempotency key conflict")
 
 type PostgresPaymentRepository struct {
 	pool *pgxpool.Pool
@@ -40,6 +43,7 @@ func (r *PostgresPaymentRepository) Save(
 		INSERT INTO payments (
 			id,
 			client_id,
+		    idempotency_key,
 			amount,
 			currency,
 			status,
@@ -48,7 +52,7 @@ func (r *PostgresPaymentRepository) Save(
 			updated_at,
 			version
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`
 
 	_, err := r.pool.Exec(
@@ -56,6 +60,7 @@ func (r *PostgresPaymentRepository) Save(
 		query,
 		p.ID,
 		p.ClientID,
+		p.IdempotencyKey,
 		p.Amount,
 		p.Currency,
 		p.Status,
@@ -64,6 +69,13 @@ func (r *PostgresPaymentRepository) Save(
 		p.UpdatedAt,
 		p.Version,
 	)
+
+	var pgErr *pgconn.PgError
+
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "idx_payments_idempotency_key" {
+		return ErrIdempotencyConflict
+	}
+
 	if err != nil {
 		return fmt.Errorf("save payment: %w", err)
 	}
@@ -114,4 +126,20 @@ func (r *PostgresPaymentRepository) Update(ctx context.Context, p payment.Paymen
 		return OptimisticLockingConflict
 	}
 	return nil
+}
+
+func (r *PostgresPaymentRepository) GetByIdempotencyKey(
+	ctx context.Context,
+	idempotencyKey string,
+) (payment.Payment, error) {
+	const query = `SELECT id, client_id, idempotency_key, amount, currency, status, provider, created_at, updated_at, version FROM payments WHERE idempotency_key = $1`
+	var p payment.Payment
+	err := r.pool.QueryRow(ctx, query, idempotencyKey).Scan(&p.ID, &p.ClientID, &p.IdempotencyKey, &p.Amount, &p.Currency, &p.Status, &p.Provider, &p.CreatedAt, &p.UpdatedAt, &p.Version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return payment.Payment{}, ErrPaymentNotFound
+	}
+	if err != nil {
+		return payment.Payment{}, fmt.Errorf("get payment by idempotency key %s: %w", idempotencyKey, err)
+	}
+	return p, err
 }

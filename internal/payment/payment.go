@@ -19,20 +19,22 @@ const (
 )
 
 type Payment struct {
-	ID        string
-	ClientID  string
-	Amount    int64
-	Currency  string
-	Status    Status
-	Provider  string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Version   int64
+	ID             string
+	ClientID       string
+	IdempotencyKey string
+	Amount         int64
+	Currency       string
+	Status         Status
+	Provider       string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	Version        int64
 }
 
 func NewPayment(
 	id string,
 	clientID string,
+	idempotencyKey string,
 	amount int64,
 	currency string,
 	provider string,
@@ -52,19 +54,23 @@ func NewPayment(
 	if clientID == "" {
 		return Payment{}, errors.New("invalid payment clientID")
 	}
+	if idempotencyKey == "" {
+		return Payment{}, errors.New("invalid payment idempotencyKey")
+	}
 
 	now := time.Now().UTC()
 
 	payment := Payment{
-		ID:        id,
-		ClientID:  clientID,
-		Amount:    amount,
-		Currency:  currency,
-		Status:    StatusNew,
-		Provider:  provider,
-		CreatedAt: now,
-		UpdatedAt: now,
-		Version:   1,
+		ID:             id,
+		ClientID:       clientID,
+		IdempotencyKey: idempotencyKey,
+		Amount:         amount,
+		Currency:       currency,
+		Status:         StatusNew,
+		Provider:       provider,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		Version:        1,
 	}
 
 	return payment, nil

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -30,19 +31,32 @@ func (h *Handler) CreatePaymentHandler(
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	paymentID := fmt.Sprintf("payment-%d", time.Now().UnixNano())
-	commandID := fmt.Sprintf("command-%d", time.Now().UnixNano())
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+
+	if idempotencyKey == "" {
+		http.Error(w, "idempotency header missing", http.StatusBadRequest)
+		return
+	}
+	paymentID := "payment-" + uuid.NewSHA1(
+		uuid.NameSpaceOID,
+		[]byte("payment:"+idempotencyKey),
+	).String()
+	commandID := "command-" + uuid.NewSHA1(
+		uuid.NameSpaceOID,
+		[]byte("create-payment:"+idempotencyKey),
+	).String()
 	requestedAt := time.Now().UTC()
 
 	cmd := commands.CreatePaymentCommand{
-		CommandID:   commandID,
-		PaymentID:   paymentID,
-		ClientID:    req.ClientID,
-		Amount:      req.Amount,
-		Currency:    req.Currency,
-		Provider:    req.Provider,
-		RequestedAt: requestedAt,
-		Type:        commands.CommandTypeCreatePayment,
+		CommandID:      commandID,
+		PaymentID:      paymentID,
+		ClientID:       req.ClientID,
+		IdempotencyKey: idempotencyKey,
+		Amount:         req.Amount,
+		Currency:       req.Currency,
+		Provider:       req.Provider,
+		RequestedAt:    requestedAt,
+		Type:           commands.CommandTypeCreatePayment,
 	}
 
 	err = h.publisher.PublishCreatePayment(ctx, cmd)

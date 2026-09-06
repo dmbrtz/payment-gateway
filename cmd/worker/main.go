@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -148,17 +149,26 @@ func main() {
 				commandID = cmd.CommandID
 				paymentID = cmd.PaymentID
 
-				if err := paymentWorker.HandleCreatePayment(spanCtx, cmd); err != nil {
+				err = paymentWorker.HandleCreatePayment(spanCtx, cmd)
+
+				if errors.Is(err, worker.ErrIdempotencyKeyConflict) {
+					slog.Warn("Idempotency key conflict",
+						"commandID", cmd.CommandID,
+						"paymentID", cmd.PaymentID,
+						"idempotencyKey", cmd.IdempotencyKey)
+				} else if err != nil {
 					metrics.PaymentsFailed.Inc()
+
 					slog.Error("failed to handle create payment command",
-						"command_id", cmd.CommandID,
-						"payment_id", cmd.PaymentID,
+						"commandID", cmd.CommandID,
+						"paymentID", cmd.PaymentID,
 						"error", err,
 					)
-					return
-				}
 
-				metrics.PaymentsCreated.Inc()
+					return
+				} else {
+					metrics.PaymentsCreated.Inc()
+				}
 
 			case commands.CommandTypeProviderCallback:
 				var cmd commands.ProviderCallbackCommand

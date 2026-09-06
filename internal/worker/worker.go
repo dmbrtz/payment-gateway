@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"payment-gateway/internal/commands"
 	"payment-gateway/internal/events"
@@ -13,6 +14,8 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 )
+
+var ErrIdempotencyKeyConflict = errors.New("idempotency key conflict")
 
 type Worker struct {
 	repository repository.PaymentRepository
@@ -39,9 +42,24 @@ func (w *Worker) HandleCreatePayment(
 	ctx context.Context,
 	cmd commands.CreatePaymentCommand,
 ) error {
+	existingPayment, err := w.repository.GetByIdempotencyKey(ctx, cmd.IdempotencyKey)
+
+	if err == nil {
+		if !isSamePaymentRequest(existingPayment, cmd) {
+			return ErrIdempotencyKeyConflict
+		}
+
+		return nil
+	}
+
+	if !errors.Is(err, repository.ErrPaymentNotFound) {
+		return err
+	}
+
 	createdPayment, err := payment.NewPayment(
 		cmd.PaymentID,
 		cmd.ClientID,
+		cmd.IdempotencyKey,
 		cmd.Amount,
 		cmd.Currency,
 		cmd.Provider,
@@ -59,6 +77,21 @@ func (w *Worker) HandleCreatePayment(
 	)
 
 	saveSpan.End()
+
+	if errors.Is(err, repository.ErrIdempotencyConflict) {
+		existingPayment, getErr := w.repository.GetByIdempotencyKey(ctx, cmd.IdempotencyKey)
+
+		if getErr != nil {
+			return getErr
+		}
+
+		if !isSamePaymentRequest(existingPayment, cmd) {
+			return ErrIdempotencyKeyConflict
+		}
+
+		return nil
+
+	}
 
 	if err != nil {
 		return err
@@ -208,4 +241,18 @@ func (w *Worker) updatePaymentStatus(
 		return err
 	}
 	return nil
+}
+
+func isSamePaymentRequest(
+	p payment.Payment,
+	cmd commands.CreatePaymentCommand,
+) bool {
+	if p.ClientID != cmd.ClientID ||
+		p.Amount != cmd.Amount ||
+		p.Currency != cmd.Currency ||
+		p.Provider != cmd.Provider {
+		return false
+	}
+
+	return true
 }
