@@ -35,17 +35,18 @@ func (h *Handler) HandlePaymentCallback(
 		return
 	}
 
-	if req.PaymentID == "" || req.Status == "" {
+	if req.PaymentID == "" || req.Status == "" || req.ProviderEventID == "" {
 		http.Error(w, "payment_id and status are required", http.StatusBadRequest)
 		return
 	}
 
 	cmd := commands.ProviderCallbackCommand{
-		Type:       commands.CommandTypeProviderCallback,
-		CommandID:  fmt.Sprintf("command-%d", time.Now().UnixNano()),
-		PaymentID:  req.PaymentID,
-		Status:     req.Status,
-		ReceivedAt: time.Now().UTC(),
+		Type:            commands.CommandTypeProviderCallback,
+		CommandID:       fmt.Sprintf("command-%d", time.Now().UnixNano()),
+		PaymentID:       req.PaymentID,
+		ProviderEventID: req.ProviderEventID,
+		Status:          req.Status,
+		ReceivedAt:      time.Now().UTC(),
 	}
 
 	if err := h.publisher.PublishProviderCallback(

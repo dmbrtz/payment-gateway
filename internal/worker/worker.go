@@ -201,15 +201,33 @@ func (w *Worker) HandleProviderCallback(
 		return fmt.Errorf("unknown provider callback status: %s", cmd.Status)
 	}
 
-	if p.Status == newStatus {
+	if p.Status != newStatus {
+		err = w.updatePaymentStatus(
+			ctx,
+			&p,
+			newStatus,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = w.repository.SaveProcessedProviderCallback(
+		ctx,
+		cmd.ProviderEventID,
+		cmd.PaymentID,
+		cmd.ReceivedAt,
+	)
+
+	if errors.Is(err, repository.ErrProviderCallbackAlreadyProcessed) {
 		return nil
 	}
 
-	return w.updatePaymentStatus(
-		ctx,
-		&p,
-		newStatus,
-	)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (w *Worker) updatePaymentStatus(

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -17,11 +18,17 @@ type PaymentRepository interface {
 	GetByID(ctx context.Context, paymentID string) (payment.Payment, error)
 	Update(ctx context.Context, p payment.Payment) error
 	GetByIdempotencyKey(ctx context.Context, idempotencyKey string) (payment.Payment, error)
+	SaveProcessedProviderCallback(
+		ctx context.Context,
+		providerEventID string,
+		paymentID string,
+		receivedAt time.Time) error
 }
 
 var ErrPaymentNotFound = errors.New("payment not found")
 var OptimisticLockingConflict = errors.New("optimistic locking conflict")
 var ErrIdempotencyConflict = errors.New("idempotency key conflict")
+var ErrProviderCallbackAlreadyProcessed = errors.New("provider callback already processed")
 
 type PostgresPaymentRepository struct {
 	pool *pgxpool.Pool
@@ -142,4 +149,25 @@ func (r *PostgresPaymentRepository) GetByIdempotencyKey(
 		return payment.Payment{}, fmt.Errorf("get payment by idempotency key %s: %w", idempotencyKey, err)
 	}
 	return p, err
+}
+
+func (r *PostgresPaymentRepository) SaveProcessedProviderCallback(ctx context.Context, providerEventID string, paymentID string, receivedAt time.Time) error {
+	const query = `
+INSERT INTO processed_provider_callbacks(provider_event_id, payment_id, received_at)
+VALUES ($1, $2, $3)`
+
+	_, err := r.pool.Exec(ctx, query, providerEventID, paymentID, receivedAt)
+
+	var pgErr *pgconn.PgError
+
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "processed_provider_callbacks_pkey" {
+		return ErrProviderCallbackAlreadyProcessed
+	}
+
+	if err != nil {
+		return fmt.Errorf("save payment: %w", err)
+	}
+
+	return nil
+
 }

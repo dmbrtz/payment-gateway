@@ -36,6 +36,7 @@ INSERT INTO payment_views (
                            version
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+ON CONFLICT (id) DO NOTHING 
 `
 	_, err := r.pool.Exec(ctx,
 		query,
@@ -64,6 +65,7 @@ SET
     updated_at = $2,
     version = $3
 WHERE id = $4
+AND version < $3
 `
 	_, err := r.pool.Exec(ctx,
 		query,
