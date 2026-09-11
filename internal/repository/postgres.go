@@ -26,7 +26,7 @@ type PaymentRepository interface {
 }
 
 var ErrPaymentNotFound = errors.New("payment not found")
-var OptimisticLockingConflict = errors.New("optimistic locking conflict")
+var ErrOptimisticLockingConflict = errors.New("optimistic locking conflict")
 var ErrIdempotencyConflict = errors.New("idempotency key conflict")
 var ErrProviderCallbackAlreadyProcessed = errors.New("provider callback already processed")
 
@@ -130,7 +130,7 @@ func (r *PostgresPaymentRepository) Update(ctx context.Context, p payment.Paymen
 		return nil
 	}
 	if result.RowsAffected() == 0 {
-		return OptimisticLockingConflict
+		return ErrOptimisticLockingConflict
 	}
 	return nil
 }

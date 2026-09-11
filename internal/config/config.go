@@ -9,6 +9,7 @@ type Config struct {
 	KafkaBroker            string
 	KafkaTopic             string
 	KafkaEventsTopic       string
+	KafkaDlqTopic          string
 	KafkaProjectionGroupID string
 	KafkaGroupID           string
 	HTTPAddr               string
@@ -19,6 +20,7 @@ func Load() (*Config, error) {
 	kafkaBroker := os.Getenv("KAFKA_BROKER")
 	kafkaTopic := os.Getenv("KAFKA_TOPIC")
 	kafkaEventsTopic := os.Getenv("KAFKA_EVENTS_TOPIC")
+	kafkaDlqTopic := os.Getenv("KAFKA_DLQ_TOPIC")
 	kafkaProjectionGroupID := os.Getenv("KAFKA_PROJECTION_GROUP_ID")
 	kafkaGroupID := os.Getenv("KAFKA_GROUP_ID")
 	httpAddr := os.Getenv("HTTP_ADDR")
@@ -34,6 +36,10 @@ func Load() (*Config, error) {
 
 	if kafkaEventsTopic == "" {
 		return nil, errors.New("KAFKA_EVENTS_TOPIC is required")
+	}
+
+	if kafkaDlqTopic == "" {
+		return nil, errors.New("KAFKA_DLQ_TOPIC is required")
 	}
 
 	if kafkaProjectionGroupID == "" {
@@ -56,6 +62,7 @@ func Load() (*Config, error) {
 		KafkaBroker:            kafkaBroker,
 		KafkaTopic:             kafkaTopic,
 		KafkaEventsTopic:       kafkaEventsTopic,
+		KafkaDlqTopic:          kafkaDlqTopic,
 		KafkaProjectionGroupID: kafkaProjectionGroupID,
 		KafkaGroupID:           kafkaGroupID,
 		HTTPAddr:               httpAddr,

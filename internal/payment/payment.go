@@ -40,22 +40,22 @@ func NewPayment(
 	provider string,
 ) (Payment, error) {
 	if amount <= 0 {
-		return Payment{}, errors.New("amount must be greater than zero")
+		return Payment{}, ErrInvalidAmount
 	}
 	if id == "" {
-		return Payment{}, errors.New("invalid payment id")
+		return Payment{}, ErrInvalidPaymentID
 	}
 	if currency == "" {
-		return Payment{}, errors.New("invalid payment currency")
+		return Payment{}, ErrInvalidCurrency
 	}
 	if provider == "" {
-		return Payment{}, errors.New("invalid payment provider")
+		return Payment{}, ErrInvalidProvider
 	}
 	if clientID == "" {
-		return Payment{}, errors.New("invalid payment clientID")
+		return Payment{}, ErrInvalidClientID
 	}
 	if idempotencyKey == "" {
-		return Payment{}, errors.New("invalid payment idempotencyKey")
+		return Payment{}, ErrInvalidIdempotencyKey
 	}
 
 	now := time.Now().UTC()
@@ -86,7 +86,15 @@ func NewPayment(
 //	return errors.New("invalid transition order use")
 //}
 
-var ErrInvalidStatusTransition = errors.New("invalid status transition")
+var (
+	ErrInvalidStatusTransition = errors.New("invalid status transition")
+	ErrInvalidAmount           = errors.New("amount must be greater than zero")
+	ErrInvalidPaymentID        = errors.New("invalid payment id")
+	ErrInvalidCurrency         = errors.New("invalid payment currency")
+	ErrInvalidProvider         = errors.New("invalid payment provider")
+	ErrInvalidClientID         = errors.New("invalid payment clientID")
+	ErrInvalidIdempotencyKey   = errors.New("invalid payment idempotencyKey")
+)
 
 func (s Status) IsTerminal() bool {
 	if s == StatusDeclined || s == StatusFailed || s == StatusCanceled || s == StatusRefunded {

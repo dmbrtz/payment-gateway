@@ -15,7 +15,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-var ErrIdempotencyKeyConflict = errors.New("idempotency key conflict")
+var (
+	ErrIdempotencyKeyConflict        = errors.New("idempotency key conflict")
+	ErrInvalidProviderCallbackStatus = errors.New("unknown provider callback status")
+)
 
 type Worker struct {
 	repository repository.PaymentRepository
@@ -198,7 +201,9 @@ func (w *Worker) HandleProviderCallback(
 	case "failed":
 		newStatus = payment.StatusFailed
 	default:
-		return fmt.Errorf("unknown provider callback status: %s", cmd.Status)
+		return fmt.Errorf("%w: %s", ErrInvalidProviderCallbackStatus,
+			cmd.Status,
+		)
 	}
 
 	if p.Status != newStatus {
