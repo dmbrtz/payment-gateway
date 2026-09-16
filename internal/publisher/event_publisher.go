@@ -9,6 +9,17 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
+type EventPublisher interface {
+	PublishPaymentCreated(
+		ctx context.Context,
+		event events.PaymentCreatedEvent,
+	) error
+	PublishPaymentStatusChanged(
+		ctx context.Context,
+		event events.PaymentStatusChangedEvent,
+	) error
+	PublishRawOutboxEvent(ctx context.Context, kafkaKey string, payload []byte) error
+}
 type KafkaEventPublisher struct {
 	writer *kafka.Writer
 }
@@ -65,6 +76,21 @@ func (p *KafkaEventPublisher) PublishPaymentStatusChanged(
 	if err != nil {
 		return fmt.Errorf("publish payment status changed event: %w", err)
 	}
+	return nil
+}
+
+func (p *KafkaEventPublisher) PublishRawOutboxEvent(ctx context.Context, kafkaKey string, payload []byte) error {
+	message := kafka.Message{
+		Key:   []byte(kafkaKey),
+		Value: payload,
+	}
+
+	err := p.writer.WriteMessages(ctx, message)
+
+	if err != nil {
+		return fmt.Errorf("publish raw outbox message error: %w", err)
+	}
+
 	return nil
 }
 

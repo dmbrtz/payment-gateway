@@ -13,6 +13,7 @@ import (
 	"payment-gateway/internal/database"
 	"payment-gateway/internal/dlq"
 	"payment-gateway/internal/metrics"
+	"payment-gateway/internal/outbox"
 	"payment-gateway/internal/payment"
 	"payment-gateway/internal/provider"
 	"payment-gateway/internal/publisher"
@@ -70,6 +71,10 @@ func main() {
 	paymentRepository :=
 		repository.NewPostgresPaymentRepository(databasePool)
 
+	outboxRepository := outbox.NewPostgresOutboxRepository(databasePool)
+
+	transactionManager := database.NewPostgresTransactionManager(databasePool)
+
 	eventPublisher := publisher.NewKafkaEventPublisher(
 		cfg.KafkaBroker,
 		cfg.KafkaEventsTopic,
@@ -125,9 +130,10 @@ func main() {
 
 	paymentWorker := worker.NewWorker(
 		paymentRepository,
-		eventPublisher,
 		tracer,
 		paymentProvider,
+		outboxRepository,
+		transactionManager,
 	)
 
 	for {

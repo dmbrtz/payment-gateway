@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,4 +23,22 @@ func NewPostgresPool(
 	}
 
 	return pool, nil
+}
+
+type TransactionManager interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+type PostgresTransactionManager struct {
+	pool *pgxpool.Pool
+}
+
+func NewPostgresTransactionManager(pool *pgxpool.Pool) *PostgresTransactionManager {
+	return &PostgresTransactionManager{
+		pool: pool,
+	}
+}
+
+func (m *PostgresTransactionManager) Begin(ctx context.Context) (pgx.Tx, error) {
+	return m.pool.Begin(ctx)
 }

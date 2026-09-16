@@ -23,6 +23,8 @@ type PaymentRepository interface {
 		providerEventID string,
 		paymentID string,
 		receivedAt time.Time) error
+	SaveTx(ctx context.Context, tx pgx.Tx, p payment.Payment) error
+	UpdateTx(ctx context.Context, tx pgx.Tx, p payment.Payment) error
 }
 
 var ErrPaymentNotFound = errors.New("payment not found")
@@ -170,4 +172,88 @@ VALUES ($1, $2, $3)`
 
 	return nil
 
+}
+
+func (r *PostgresPaymentRepository) SaveTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	p payment.Payment,
+) error {
+
+	const query = `
+		INSERT INTO payments (
+			id,
+			client_id,
+		    idempotency_key,
+			amount,
+			currency,
+			status,
+			provider,
+			created_at,
+			updated_at,
+			version
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`
+
+	_, err := tx.Exec(
+		ctx,
+		query,
+		p.ID,
+		p.ClientID,
+		p.IdempotencyKey,
+		p.Amount,
+		p.Currency,
+		p.Status,
+		p.Provider,
+		p.CreatedAt,
+		p.UpdatedAt,
+		p.Version,
+	)
+
+	var pgErr *pgconn.PgError
+
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "idx_payments_idempotency_key" {
+		return ErrIdempotencyConflict
+	}
+
+	if err != nil {
+		return fmt.Errorf("save payment: %w", err)
+	}
+
+	return nil
+
+}
+
+func (r *PostgresPaymentRepository) UpdateTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	p payment.Payment,
+) error {
+	const query = `
+	UPDATE payments
+	SET
+	    client_id = $1,
+	    amount = $2,
+	    currency = $3,
+	    status = $4,
+	    provider = $5,
+	    updated_at = $6,
+	    version = $7
+	WHERE id = $8
+	AND version = $9
+`
+	result, err := tx.Exec(ctx, query, p.ClientID, p.Amount, p.Currency, p.Status, p.Provider, p.UpdatedAt, p.Version, p.ID, p.Version-1)
+
+	if err != nil {
+		return fmt.Errorf("update payment %s: %w", p.ID, err)
+	}
+
+	if result.RowsAffected() == 1 {
+		return nil
+	}
+	if result.RowsAffected() == 0 {
+		return ErrOptimisticLockingConflict
+	}
+	return nil
 }

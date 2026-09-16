@@ -2,13 +2,15 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"payment-gateway/internal/commands"
+	"payment-gateway/internal/database"
 	"payment-gateway/internal/events"
+	"payment-gateway/internal/outbox"
 	"payment-gateway/internal/payment"
 	"payment-gateway/internal/provider"
-	"payment-gateway/internal/publisher"
 	"payment-gateway/internal/repository"
 	"time"
 
@@ -21,23 +23,26 @@ var (
 )
 
 type Worker struct {
-	repository repository.PaymentRepository
-	publisher  publisher.EventPublisher
-	tracer     trace.Tracer
-	provider   provider.PaymentProvider
+	repository         repository.PaymentRepository
+	tracer             trace.Tracer
+	provider           provider.PaymentProvider
+	outboxRepository   outbox.OutboxRepository
+	transactionManager database.TransactionManager
 }
 
 func NewWorker(
 	r repository.PaymentRepository,
-	p publisher.EventPublisher,
 	t trace.Tracer,
 	prov provider.PaymentProvider,
+	obr outbox.OutboxRepository,
+	tm database.TransactionManager,
 ) *Worker {
 	return &Worker{
-		repository: r,
-		publisher:  p,
-		tracer:     t,
-		provider:   prov,
+		repository:         r,
+		tracer:             t,
+		provider:           prov,
+		outboxRepository:   obr,
+		transactionManager: tm,
 	}
 }
 
@@ -46,7 +51,6 @@ func (w *Worker) HandleCreatePayment(
 	cmd commands.CreatePaymentCommand,
 ) error {
 	existingPayment, err := w.repository.GetByIdempotencyKey(ctx, cmd.IdempotencyKey)
-
 	if err == nil {
 		if !isSamePaymentRequest(existingPayment, cmd) {
 			return ErrIdempotencyKeyConflict
@@ -67,35 +71,6 @@ func (w *Worker) HandleCreatePayment(
 		cmd.Currency,
 		cmd.Provider,
 	)
-
-	if err != nil {
-		return err
-	}
-
-	saveCtx, saveSpan := w.tracer.Start(ctx, "postgres-save")
-
-	err = w.repository.Save(
-		saveCtx,
-		createdPayment,
-	)
-
-	saveSpan.End()
-
-	if errors.Is(err, repository.ErrIdempotencyConflict) {
-		existingPayment, getErr := w.repository.GetByIdempotencyKey(ctx, cmd.IdempotencyKey)
-
-		if getErr != nil {
-			return getErr
-		}
-
-		if !isSamePaymentRequest(existingPayment, cmd) {
-			return ErrIdempotencyKeyConflict
-		}
-
-		return nil
-
-	}
-
 	if err != nil {
 		return err
 	}
@@ -113,45 +88,78 @@ func (w *Worker) HandleCreatePayment(
 		Type:       events.EventTypePaymentCreated,
 	}
 
-	publishCtx, publishSpan := w.tracer.Start(ctx, "kafka-publish-payment-created")
+	payload, err := json.Marshal(paymentCreatedEvent)
+	if err != nil {
+		return fmt.Errorf(
+			"marshal payment created event error: %w", err,
+		)
+	}
 
-	err = w.publisher.PublishPaymentCreated(
-		publishCtx,
-		paymentCreatedEvent,
+	outboxEvent := outbox.NewOutboxEvent(
+		paymentCreatedEvent.PaymentID,
+		string(paymentCreatedEvent.Type),
+		payload,
 	)
 
-	publishSpan.End()
+	saveCtx, saveSpan := w.tracer.Start(ctx, "postgres-save")
 
+	tx, err := w.transactionManager.Begin(saveCtx)
+	if err != nil {
+		saveSpan.End()
+		return err
+	}
+
+	defer tx.Rollback(saveCtx)
+
+	err = w.repository.SaveTx(
+		saveCtx,
+		tx,
+		createdPayment,
+	)
+
+	if errors.Is(err, repository.ErrIdempotencyConflict) {
+		_ = tx.Rollback(saveCtx)
+		saveSpan.End()
+
+		existingPayment, getErr := w.repository.GetByIdempotencyKey(ctx, cmd.IdempotencyKey)
+
+		if getErr != nil {
+			return getErr
+		}
+
+		if !isSamePaymentRequest(existingPayment, cmd) {
+			return ErrIdempotencyKeyConflict
+		}
+
+		return nil
+
+	}
+	if err != nil {
+		saveSpan.End()
+		return err
+	}
+
+	err = w.outboxRepository.SaveTx(
+		saveCtx,
+		tx,
+		outboxEvent,
+	)
+	if err != nil {
+		saveSpan.End()
+		return err
+	}
+
+	err = tx.Commit(saveCtx)
+	saveSpan.End()
 	if err != nil {
 		return err
 	}
 
-	err = createdPayment.ChangeStatus(payment.StatusProcessing)
-
-	if err != nil {
-		return err
-	}
-
-	err = w.repository.Update(ctx, createdPayment)
-
-	if err != nil {
-		return err
-	}
-
-	statusChangedEvent := events.PaymentStatusChangedEvent{
-		EventID:    fmt.Sprintf("event-%d", time.Now().UnixNano()),
-		PaymentID:  createdPayment.ID,
-		Status:     createdPayment.Status,
-		Version:    createdPayment.Version,
-		OccurredAt: time.Now().UTC(),
-		Type:       events.EventTypePaymentStatusChanged,
-	}
-
-	err = w.publisher.PublishPaymentStatusChanged(
+	err = w.updatePaymentStatus(
 		ctx,
-		statusChangedEvent,
+		&createdPayment,
+		payment.StatusProcessing,
 	)
-
 	if err != nil {
 		return err
 	}
@@ -254,15 +262,47 @@ func (w *Worker) updatePaymentStatus(
 		Type:       events.EventTypePaymentStatusChanged,
 	}
 
-	err = w.repository.Update(ctx, *p)
+	payload, err := json.Marshal(event)
+
+	if err != nil {
+		return fmt.Errorf("failed to marshal status changed event: %w", err)
+	}
+
+	outboxEvent := outbox.NewOutboxEvent(
+		event.PaymentID,
+		string(event.Type),
+		payload,
+	)
+
+	tx, err := w.transactionManager.Begin(ctx)
+
 	if err != nil {
 		return err
 	}
 
-	err = w.publisher.PublishPaymentStatusChanged(ctx, event)
+	defer tx.Rollback(ctx)
+
+	err = w.repository.UpdateTx(ctx, tx, *p)
 	if err != nil {
 		return err
 	}
+
+	err = w.outboxRepository.SaveTx(
+		ctx,
+		tx,
+		outboxEvent,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	err = tx.Commit(ctx)
+
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 

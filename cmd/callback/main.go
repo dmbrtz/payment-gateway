@@ -16,7 +16,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	commandPublisher := publisher.NewKafkaPublisher(
+	commandPublisher := publisher.NewKafkaCommandPublisher(
 		cfg.KafkaBroker,
 		cfg.KafkaTopic,
 	)

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"payment-gateway/internal/commands"
-	"payment-gateway/internal/events"
 
 	"github.com/segmentio/kafka-go"
 )
@@ -22,12 +21,12 @@ type CommandPublisher interface {
 	) error
 }
 
-type KafkaPublisher struct {
+type KafkaCommandPublisher struct {
 	writer *kafka.Writer
 }
 
-func NewKafkaPublisher(broker string, topic string) *KafkaPublisher {
-	return &KafkaPublisher{
+func NewKafkaCommandPublisher(broker string, topic string) *KafkaCommandPublisher {
+	return &KafkaCommandPublisher{
 		writer: &kafka.Writer{
 			Addr:         kafka.TCP(broker),
 			Topic:        topic,
@@ -38,7 +37,7 @@ func NewKafkaPublisher(broker string, topic string) *KafkaPublisher {
 	}
 }
 
-func (p *KafkaPublisher) PublishCreatePayment(
+func (p *KafkaCommandPublisher) PublishCreatePayment(
 	ctx context.Context,
 	cmd commands.CreatePaymentCommand,
 ) error {
@@ -65,7 +64,7 @@ func (p *KafkaPublisher) PublishCreatePayment(
 	return nil
 }
 
-func (p *KafkaPublisher) PublishProviderCallback(
+func (p *KafkaCommandPublisher) PublishProviderCallback(
 	ctx context.Context,
 	cmd commands.ProviderCallbackCommand,
 ) error {
@@ -88,17 +87,6 @@ func (p *KafkaPublisher) PublishProviderCallback(
 	return nil
 }
 
-func (p *KafkaPublisher) Close() error {
+func (p *KafkaCommandPublisher) Close() error {
 	return p.writer.Close()
-}
-
-type EventPublisher interface {
-	PublishPaymentCreated(
-		ctx context.Context,
-		event events.PaymentCreatedEvent,
-	) error
-	PublishPaymentStatusChanged(
-		ctx context.Context,
-		event events.PaymentStatusChangedEvent,
-	) error
 }
