@@ -2,25 +2,18 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"payment-gateway/internal/commands"
 	"payment-gateway/internal/config"
 	"payment-gateway/internal/database"
 	"payment-gateway/internal/dlq"
-	"payment-gateway/internal/metrics"
 	"payment-gateway/internal/outbox"
-	"payment-gateway/internal/payment"
 	"payment-gateway/internal/provider"
-	"payment-gateway/internal/publisher"
 	"payment-gateway/internal/repository"
 	"payment-gateway/internal/tracing"
 	"payment-gateway/internal/worker"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/segmentio/kafka-go"
@@ -31,6 +24,11 @@ func main() {
 	ctx := context.Background()
 
 	cfg, err := config.Load()
+
+	if err != nil {
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
 
 	tp, err := tracing.NewTracerProvider()
 	if err != nil {
@@ -52,11 +50,6 @@ func main() {
 		"group_id", fmt.Sprintf("%q", cfg.KafkaGroupID),
 	)
 
-	if err != nil {
-		slog.Error("Error loading config", "error", err)
-		os.Exit(1)
-	}
-
 	databasePool, err := database.NewPostgresPool(
 		ctx,
 		cfg.DatabaseURL,
@@ -74,18 +67,6 @@ func main() {
 	outboxRepository := outbox.NewPostgresOutboxRepository(databasePool)
 
 	transactionManager := database.NewPostgresTransactionManager(databasePool)
-
-	eventPublisher := publisher.NewKafkaEventPublisher(
-		cfg.KafkaBroker,
-		cfg.KafkaEventsTopic,
-	)
-
-	defer func() {
-		if err := eventPublisher.Close(); err != nil {
-			slog.Error("failed to close event publisher:",
-				"error", err)
-		}
-	}()
 
 	dlqPublisher := dlq.NewDlqKafkaPublisher(
 		cfg.KafkaBroker,
@@ -136,213 +117,14 @@ func main() {
 		transactionManager,
 	)
 
-	for {
-		message, err := reader.FetchMessage(ctx)
-		if err != nil {
-			slog.Error("failed to fetch kafka message", "error", err)
-			continue
-		}
+	consumer := worker.NewConsumer(
+		reader,
+		dlqPublisher,
+		paymentWorker,
+		tracer,
+	)
 
-		func() {
-			spanCtx, span := tracer.Start(ctx, "process-payment")
-			defer span.End()
-
-			start := time.Now()
-
-			var envelope commands.Envelope
-
-			if unmarshalErr := json.Unmarshal(message.Value, &envelope); unmarshalErr != nil {
-				err := dlq.SendToDlqAndCommit(
-					spanCtx,
-					reader,
-					dlqPublisher,
-					message,
-					fmt.Sprintf("failed to unmarshal command envelope: %v",
-						unmarshalErr,
-					),
-				)
-
-				if err != nil {
-					slog.Error("failed to SendToDlqAndCommit",
-						"error", err,
-					)
-				}
-				return
-			}
-
-			var commandID, paymentID string
-
-			switch envelope.Type {
-			case commands.CommandTypeCreatePayment:
-				var cmd commands.CreatePaymentCommand
-
-				if err := json.Unmarshal(message.Value, &cmd); err != nil {
-					slog.Error("failed to unmarshal create payment command", "error", err)
-					dlqErr := dlq.SendToDlqAndCommit(
-						spanCtx,
-						reader,
-						dlqPublisher,
-						message,
-						fmt.Sprintf("failed to unmarshal create payment command: %v", err),
-					)
-					if dlqErr != nil {
-						slog.Error("failed to SendToDlqAndCommit", dlqErr)
-						return
-					}
-					return
-				}
-
-				commandID = cmd.CommandID
-				paymentID = cmd.PaymentID
-
-				err = retry(func() error {
-					return paymentWorker.HandleCreatePayment(spanCtx, cmd)
-				}, 3, 5*time.Second, func(err error) bool {
-					if errors.Is(err, worker.ErrIdempotencyKeyConflict) || errors.Is(err, payment.ErrInvalidAmount) || errors.Is(err, payment.ErrInvalidCurrency) || errors.Is(err, payment.ErrInvalidPaymentID) || errors.Is(err, payment.ErrInvalidProvider) || errors.Is(err, payment.ErrInvalidClientID) || errors.Is(err, payment.ErrInvalidIdempotencyKey) || errors.Is(err, payment.ErrInvalidStatusTransition) {
-						return false
-					}
-					return true
-				},
-				)
-
-				if errors.Is(err, worker.ErrIdempotencyKeyConflict) {
-					slog.Warn("Idempotency key conflict",
-						"commandID", cmd.CommandID,
-						"paymentID", cmd.PaymentID,
-						"idempotencyKey", cmd.IdempotencyKey)
-				} else if err != nil {
-					metrics.PaymentsFailed.Inc()
-
-					slog.Error("failed to handle create payment command",
-						"commandID", cmd.CommandID,
-						"paymentID", cmd.PaymentID,
-						"error", err,
-					)
-					dlqErr := dlq.SendToDlqAndCommit(
-						spanCtx,
-						reader,
-						dlqPublisher,
-						message,
-						fmt.Sprintf("create payment processing failed: %v", err),
-					)
-					if dlqErr != nil {
-						slog.Error("failed to SendToDlqAndCommit",
-							"error", dlqErr,
-						)
-					}
-					return
-				} else {
-					metrics.PaymentsCreated.Inc()
-				}
-
-			case commands.CommandTypeProviderCallback:
-				var cmd commands.ProviderCallbackCommand
-
-				if err := json.Unmarshal(message.Value, &cmd); err != nil {
-					slog.Error("failed to unmarshal provider callback command", "error", err)
-					dlqErr := dlq.SendToDlqAndCommit(
-						spanCtx,
-						reader,
-						dlqPublisher,
-						message,
-						fmt.Sprintf("failed to unmarshal provider callback command: %v", err),
-					)
-
-					if dlqErr != nil {
-						slog.Error("failed to SendToDlqAndCommit", dlqErr)
-					}
-					return
-				}
-
-				commandID = cmd.CommandID
-				paymentID = cmd.PaymentID
-
-				err := retry(func() error {
-					return paymentWorker.HandleProviderCallback(spanCtx, cmd)
-				},
-					3, 5*time.Second, func(err error) bool {
-						if errors.Is(err, worker.ErrInvalidProviderCallbackStatus) {
-							return false
-						}
-						return true
-					},
-				)
-
-				if err != nil {
-					metrics.PaymentsFailed.Inc()
-					slog.Error("failed to handle provider callback command")
-					dlqErr := dlq.SendToDlqAndCommit(
-						spanCtx,
-						reader,
-						dlqPublisher,
-						message,
-						fmt.Sprintf("provider callback processing failed: %v", err),
-					)
-
-					if dlqErr != nil {
-						slog.Error("failed to SendToDlqAndCommit",
-							"error", dlqErr,
-						)
-						return
-					}
-				}
-
-			default:
-				err := dlq.SendToDlqAndCommit(
-					spanCtx,
-					reader,
-					dlqPublisher,
-					message,
-					fmt.Sprintf("unknown command type: %v", envelope.Type),
-				)
-				if err != nil {
-					slog.Error("failed to SendToDlqAndCommit",
-						"error", err,
-					)
-				}
-				return
-
-			}
-
-			metrics.PaymentProcessingDuration.Observe(time.Since(start).Seconds())
-
-			commCtx, commSpan := tracer.Start(spanCtx, "kafka-commit")
-
-			err = reader.CommitMessages(commCtx, message)
-
-			commSpan.End()
-
-			if err != nil {
-				slog.Error("commit messages error command_id=", commandID,
-					"error", err,
-				)
-				return
-			}
-
-			slog.Info("committed command",
-				"command_id", commandID,
-				"payment_id", paymentID,
-			)
-		}()
+	if err := consumer.Run(ctx); err != nil {
+		slog.Error("consumer error", "error", err)
 	}
-}
-
-func retry(operation func() error, attempts int, delay time.Duration, isRetryable func(error) bool) error {
-	var err error
-	for i := 0; i < attempts; i++ {
-		err = operation()
-		if err != nil {
-			if i < attempts-1 {
-				if isRetryable(err) {
-					time.Sleep(delay)
-					continue
-				} else {
-					return err
-				}
-			}
-		} else {
-			return nil
-		}
-	}
-	return err
 }
